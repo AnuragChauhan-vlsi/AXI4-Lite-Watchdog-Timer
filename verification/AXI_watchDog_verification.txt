@@ -1,0 +1,600 @@
+`timescale 1ns/1ps
+
+interface myif(input logic ACLK);
+logic ARESETN;
+
+// WRITE ADDRESS CHANNEL
+  
+logic [31:0] AWADDR;
+logic        AWVALID;
+logic        AWREADY;
+
+// WRITE DATA CHANNEL
+
+logic [31:0] WDATA;
+logic        WVALID;
+logic        WREADY;
+
+// WRITE RESPONSE CHANNEL
+
+logic        BVALID;
+logic        BREADY;
+
+// READ ADDRESS CHANNEL
+
+logic [31:0] ARADDR;
+logic        ARVALID;
+logic        ARREADY;
+
+// READ DATA CHANNEL
+
+logic [31:0] RDATA;
+logic        RVALID;
+logic        RREADY;
+
+// DUT OUTPUTS
+
+logic timeout;
+logic reset_out;
+logic system_reset_out;
+
+// FUNCTIONAL COVERAGE
+
+covergroup cg @(posedge ACLK);
+
+   // Register Access Coverage
+
+   cp_addr : coverpoint AWADDR
+   {
+      bins control = {32'h00};
+      bins load    = {32'h04};
+      bins kick    = {32'h08};
+   }
+
+   // Load Value Coverage
+
+   cp_data : coverpoint WDATA
+   {
+      bins low    = {[5:30]};
+      bins med = {[31:70]};
+      bins high   = {[71:100]};
+   }
+
+   // Timeout Coverage
+
+   cp_timeout : coverpoint timeout;
+
+   // Reset Coverage
+
+   cp_reset : coverpoint reset_out;
+
+   // System Reset Coverage
+
+   cp_sysreset : coverpoint system_reset_out;
+
+   // Cross Coverage
+
+
+cross cp_addr, cp_data
+{
+    ignore_bins ctrl =
+        binsof(cp_addr.control);
+
+    ignore_bins kick =
+        binsof(cp_addr.kick);
+}
+
+endgroup
+
+cg cov;
+
+initial
+    cov = new();
+// ASSERTIONS
+
+property p_timeout_reset;
+
+   @(posedge ACLK)
+
+   timeout |-> (reset_out && system_reset_out);
+
+endproperty
+
+ASSERT_TIMEOUT :
+
+assert property(p_timeout_reset)
+
+else
+
+$error("Timeout did not generate reset.");
+
+property p_reset_clear;
+
+   @(posedge ACLK)
+
+   !ARESETN |=> (!timeout);
+
+endproperty
+
+ASSERT_RESET :
+
+assert property(p_reset_clear)
+
+else
+
+$error("Timeout not cleared after reset.");
+
+
+final
+begin
+
+  $display("\n---");
+
+   $display("Functional Coverage = %0.2f %%",cov.get_coverage());
+
+  $display("---\n");
+
+end
+
+endinterface
+  
+  class packet;
+
+   rand bit [31:0] load_value;
+
+   rand int unsigned kick_delay;
+
+   rand int unsigned num_kicks;
+    
+   bit write;
+
+   bit [31:0] addr;
+   bit [31:0] data;
+
+   bit [31:0] rdata;
+
+   bit timeout;
+
+   bit reset_out;
+
+   bit system_reset_out;
+    
+   constraint c_load
+   {
+      load_value inside {[5:100]};
+   }
+
+   constraint c_delay
+   {
+      kick_delay inside {[1:10]};
+   }
+
+   constraint c_num
+   {
+      num_kicks inside {[1:8]};
+   }
+
+   function void display();
+
+     $display("\n---");
+
+      $display("LOAD VALUE : %0d",load_value);
+
+      $display("KICK DELAY : %0d",kick_delay);
+
+      $display("NUM KICKS  : %0d",num_kicks);
+
+     $display("---n");
+
+   endfunction
+
+endclass
+  
+class generator;
+
+   mailbox #(packet) mb;
+
+   task run();
+
+      packet pkt;
+
+      pkt = new();
+
+      assert(pkt.randomize())
+      else
+        $fatal(1, "Randomization Failed!");
+
+      pkt.display();
+
+      mb.put(pkt);
+
+     repeat(30)
+
+      begin
+
+         pkt = new();
+
+         assert(pkt.randomize());
+
+         pkt.display();
+
+         mb.put(pkt);
+
+      end
+
+   endtask
+
+endclass
+  
+  class driver;
+
+   mailbox #(packet) mb;
+
+   virtual myif vif;
+
+   task axi_write(input [31:0] addr,
+                  input [31:0] data);
+
+      @(posedge vif.ACLK);
+
+      vif.AWADDR  <= addr;
+      vif.WDATA   <= data;
+
+      vif.AWVALID <= 1;
+      vif.WVALID  <= 1;
+
+      vif.BREADY  <= 1;
+
+      @(posedge vif.ACLK);
+
+      vif.AWVALID <= 0;
+      vif.WVALID  <= 0;
+
+   endtask
+
+   task axi_read(input [31:0] addr);
+
+      @(posedge vif.ACLK);
+
+      vif.ARADDR <= addr;
+
+      vif.ARVALID <= 1;
+
+      vif.RREADY <= 1;
+
+      @(posedge vif.ACLK);
+
+      vif.ARVALID <= 0;
+
+   endtask
+
+   task run();
+
+      packet pkt;
+
+      forever
+
+      begin
+
+         mb.get(pkt);
+
+   
+ // Program Load Register
+
+         axi_write(32'h04,pkt.load_value);
+ // Enable Watchdog
+
+
+         axi_write(32'h00,32'h1);
+
+
+ // Random Kick Operations
+    
+
+         repeat(pkt.num_kicks)
+
+         begin
+
+            repeat(pkt.kick_delay)
+
+               @(posedge vif.ACLK);
+
+           axi_write(32'h08,32'h1);	//random anything sent
+
+         end
+
+
+// Read Timeout Register
+
+         axi_read(32'h0C);
+
+      end
+
+   endtask
+
+endclass
+  
+  class monitor;
+
+   mailbox #(packet) mb;
+
+   virtual myif vif;
+
+   task run();
+
+      packet pkt;
+
+      forever
+
+      begin
+
+         @(posedge vif.ACLK);
+
+// WRITE TRANSACTION
+
+         if(vif.AWVALID && vif.AWREADY)
+
+         begin
+
+            pkt = new();
+
+            pkt.write = 1;
+
+            pkt.addr = vif.AWADDR;
+
+            pkt.data = vif.WDATA;
+
+            pkt.timeout = vif.timeout;
+
+            pkt.reset_out = vif.reset_out;
+
+            pkt.system_reset_out = vif.system_reset_out;
+
+            mb.put(pkt);
+
+         end
+// READ TRANSACTION
+
+
+         if(vif.ARVALID && vif.ARREADY)
+
+         begin
+
+            pkt = new();
+
+            pkt.write = 0;
+
+            pkt.addr = vif.ARADDR;
+
+            pkt.rdata = vif.RDATA;
+
+            pkt.timeout = vif.timeout;
+
+            pkt.reset_out = vif.reset_out;
+
+            pkt.system_reset_out = vif.system_reset_out;
+
+            mb.put(pkt);
+
+         end
+
+      end
+
+   endtask
+  endclass
+  
+    
+    class scoreboard;
+
+   mailbox #(packet) mb;
+
+   bit [31:0] exp_load;
+
+   bit        exp_enable;
+
+   bit        exp_timeout;
+
+   task run();
+
+      packet pkt;
+
+      forever
+      begin
+
+         mb.get(pkt);
+
+         if(pkt.write)
+         begin
+
+           case(pkt.addr)
+             
+               32'h00:
+               begin
+                  exp_enable = pkt.data[0];
+
+                  $display("SB : WATCHDOG ENABLE = %0b",
+                            exp_enable);
+               end
+
+
+               32'h04:
+               begin
+                  exp_load = pkt.data;
+
+                  $display("\nSB : LOAD REGISTER = %0d",
+                            exp_load);
+               end
+
+               32'h08:
+               begin
+
+                  if(exp_enable)
+
+                     $display("SB : WATCHDOG KICK");
+
+               end
+
+            endcase
+
+         end
+
+         else
+         begin
+
+            if(pkt.addr==32'h0C)
+            begin
+
+               exp_timeout = pkt.timeout;
+
+               if(exp_timeout==pkt.rdata[0])
+
+                  $display("PASS : Timeout Status Correct");
+
+               else
+
+                 $display("FAIL : Timeout Register  Incorrect");
+
+            end
+
+         end
+
+         if(pkt.timeout)
+         begin
+
+            if(pkt.reset_out &&
+               pkt.system_reset_out)
+
+               $display("PASS : Reset Generated");
+
+            else
+
+               $display("FAIL : Reset Missing");
+
+         end
+
+      end
+
+   endtask
+
+endclass
+
+
+
+module tb;
+
+logic ACLK;
+
+always #5 ACLK = ~ACLK;
+
+myif intf(ACLK);
+
+axi_lite_watchdog dut(
+
+.ACLK(ACLK),
+.ARESETN(intf.ARESETN),
+
+.AWADDR(intf.AWADDR),
+.AWVALID(intf.AWVALID),
+.AWREADY(intf.AWREADY),
+
+.WDATA(intf.WDATA),
+.WVALID(intf.WVALID),
+.WREADY(intf.WREADY),
+
+.BVALID(intf.BVALID),
+.BREADY(intf.BREADY),
+
+.ARADDR(intf.ARADDR),
+.ARVALID(intf.ARVALID),
+.ARREADY(intf.ARREADY),
+
+.RDATA(intf.RDATA),
+.RVALID(intf.RVALID),
+.RREADY(intf.RREADY),
+
+.timeout(intf.timeout),
+.reset_out(intf.reset_out),
+.system_reset_out(intf.system_reset_out)
+
+);
+
+generator  gen;
+driver     drv;
+monitor    mon;
+scoreboard scb;
+
+mailbox #(packet) gen_drv;
+mailbox #(packet) mon_scb;
+
+initial
+begin
+
+   ACLK = 0;
+   intf.ARESETN = 0;
+
+   intf.AWADDR  = 0;
+   intf.AWVALID = 0;
+
+   intf.WDATA   = 0;
+   intf.WVALID  = 0;
+
+   intf.BREADY  = 0;
+
+   intf.ARADDR  = 0;
+   intf.ARVALID = 0;
+
+   intf.RREADY  = 0;
+
+   #20;
+
+   intf.ARESETN = 1;
+
+   gen_drv = new();
+
+   mon_scb = new();
+
+   gen = new();
+
+   drv = new();
+
+   mon = new();
+
+   scb = new();
+
+   gen.mb = gen_drv;
+
+   drv.mb = gen_drv;
+
+   mon.mb = mon_scb;
+
+   scb.mb = mon_scb;
+
+   drv.vif = intf;
+
+   mon.vif = intf;
+
+   fork
+
+      gen.run();
+
+      drv.run();
+
+      mon.run();
+
+      scb.run();
+
+   join_none
+
+   #20000;
+
+  $display("\n---");
+
+   $display(" TEST COMPLETED ");
+
+  $display("---");
+
+   $finish;
+
+end
+
+endmodule
